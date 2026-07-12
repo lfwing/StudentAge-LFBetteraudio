@@ -8,7 +8,7 @@ LFBettermusic，一款适用于游戏《StudentAge》，基于 BepInEx、Harmony
 - 插件音乐加载期间不会提前压制原版音乐；
 - 插件音乐暂停、停止、中断、播放失败或自然结束后，会归还原版音乐渠道；
 - 插件音乐不会永久占用或破坏原版 BGM 的正常播放。
-- 
+
 BetterMusic 同时兼容正常游戏剧情和剧情编辑器 Preview。
 
 *<font color="#4bacc6">此模组实际代码编写工作由AI完成，本人仅负责构思及debug</font>*
