@@ -1,21 +1,33 @@
 using System;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using HarmonyLib;
 using LFBetterMusic.Runtime;
 using Sdk;
+using UnityEngine;
 using View.Evt;
 
 namespace LFBetterMusic.Patches
 {
     /// <summary>
-    /// 原版自动模式会把 OnClickNext 作为延时回调交给 TimerMgr。
-    /// 包装该回调，确保“自动推进”不会被误判为玩家手动点击。
+    /// 只在当前 1163 会话确实需要区分自动推进时，才给原版 TimerMgr 回调附加来源标记。
+    /// 没有相关 1163 会话时，原版 Action、计时器和自动模式逻辑完全不变。
     /// </summary>
     [HarmonyPatch(
         typeof(TimerMgr),
         nameof(TimerMgr.Delay),
         new Type[] { typeof(Action), typeof(float), typeof(int) })]
-    internal static class AutoTalkDelayContextPatch
+    internal static class AutoAdvanceDelayOriginPatch
     {
+        private sealed class CallbackState
+        {
+            internal NewTalkView Owner;
+            internal Action Wrapper;
+        }
+
+        private static readonly ConditionalWeakTable<NewTalkView, CallbackState> States =
+            new ConditionalWeakTable<NewTalkView, CallbackState>();
+
         private static void Prefix(ref Action __0)
         {
             Action original = __0;
@@ -25,44 +37,87 @@ namespace LFBetterMusic.Patches
                 return;
             }
 
-            __0 = () =>
+            BetterMusicController controller = BetterMusicController.Instance;
+            if (controller == null || !controller.ShouldTrackAutomaticAdvance(owner))
             {
-                BetterMusicController controller = BetterMusicController.Instance;
-                controller?.BeginAdvance(owner, TalkAdvanceOrigin.Automatic);
-                try
-                {
-                    original();
-                }
-                finally
-                {
-                    controller?.EndAdvance(owner);
-                }
+                return;
+            }
+
+            CallbackState state = States.GetValue(owner, CreateState);
+            __0 = state.Wrapper;
+        }
+
+        private static CallbackState CreateState(NewTalkView owner)
+        {
+            var state = new CallbackState
+            {
+                Owner = owner
             };
+            state.Wrapper = () => InvokeAutomatic(state);
+            return state;
+        }
+
+        private static void InvokeAutomatic(CallbackState state)
+        {
+            NewTalkView owner = state?.Owner;
+            if (owner == null)
+            {
+                return;
+            }
+
+            // 该回调最初由自动模式登记。若玩家之后关闭了自动模式，
+            // 只丢弃这条在 1163 会话期间登记的旧回调，不接管其他原版计时器。
+            if (!NewTalkAdvanceOriginDetector.IsAutoEnabled(owner))
+            {
+                return;
+            }
+
+            BetterMusicController controller = BetterMusicController.Instance;
+            if (controller == null || !controller.ShouldTrackAutomaticAdvance(owner))
+            {
+                owner.OnClickNext();
+                return;
+            }
+
+            controller.BeginAdvance(owner, TalkAdvanceOrigin.Automatic);
+            try
+            {
+                owner.OnClickNext();
+            }
+            finally
+            {
+                controller.EndAdvance(owner);
+            }
         }
     }
 
-    /// <summary>
-    /// 开启自动模式时，原版可能立即调用一次 OnClickNext。
-    /// </summary>
-    [HarmonyPatch(typeof(NewTalkView), nameof(NewTalkView.AutoTalk))]
-    internal static class NewTalkAutoTalkContextPatch
+    internal static class NewTalkAdvanceOriginDetector
     {
-        private static void Prefix(NewTalkView __instance, bool __0, out bool __state)
+        private static readonly FieldInfo EnableAutoTalkField =
+            AccessTools.Field(typeof(NewTalkView), "enableAutoTalk");
+
+        internal static TalkAdvanceOrigin Detect(NewTalkView view)
         {
-            __state = __0;
-            if (__state)
+            if (Time.timeScale > 1.001f)
             {
-                BetterMusicController.Instance?.BeginAdvance(
-                    __instance,
-                    TalkAdvanceOrigin.Automatic);
+                return TalkAdvanceOrigin.FastForward;
             }
+
+            return IsAutoEnabled(view)
+                ? TalkAdvanceOrigin.Automatic
+                : TalkAdvanceOrigin.Manual;
         }
 
-        private static void Postfix(NewTalkView __instance, bool __state)
+        internal static bool IsAutoEnabled(NewTalkView view)
         {
-            if (__state)
+            try
             {
-                BetterMusicController.Instance?.EndAdvance(__instance);
+                object value = EnableAutoTalkField?.GetValue(view);
+                return value is bool enabled && enabled;
+            }
+            catch
+            {
+                return false;
             }
         }
     }
@@ -74,7 +129,9 @@ namespace LFBetterMusic.Patches
         {
             BetterMusicController controller = BetterMusicController.Instance;
             __state = controller != null;
-            controller?.BeginAdvance(__instance, TalkAdvanceOrigin.Manual);
+            controller?.BeginAdvance(
+                __instance,
+                NewTalkAdvanceOriginDetector.Detect(__instance));
         }
 
         private static void Postfix(NewTalkView __instance, bool __state)

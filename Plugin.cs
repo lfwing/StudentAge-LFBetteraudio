@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -25,7 +25,7 @@ namespace LFBetterMusic
     {
         internal const string PluginGuid = "sa.lf.bettermusicplugins";
         internal const string PluginName = "lf-更好的音乐演出效果";
-        internal const string PluginVersion = "1.5.1";
+        internal const string PluginVersion = "1.6.2";
 
         internal static Plugin Instance { get; private set; }
         internal static ManualLogSource Log { get; private set; }
@@ -38,8 +38,10 @@ namespace LFBetterMusic
         private Harmony _harmony;
         private MethodInfo _normalFactoryTarget;
         private MethodInfo _normalFactoryPrefix;
-        private MethodInfo _previewTextEndTarget;
-        private MethodInfo _previewTextEndPrefix;
+        private MethodInfo _runtimeTextStartTarget;
+        private MethodInfo _runtimeTextStartPrefix;
+        private MethodInfo _previewTextStartTarget;
+        private MethodInfo _previewTextStartPrefix;
         private MethodInfo _previewRefreshTarget;
         private MethodInfo _previewRefreshPrefix;
 
@@ -64,8 +66,8 @@ namespace LFBetterMusic
                 bool loadedNormally = true;
                 _harmony = new Harmony(PluginGuid);
 
-                // 1163 正常游戏入口与编辑器 Preview 入口采用手动精确安装。
-                // 这三处不交给 PatchAll，便于启动自检及持久控制器在插件组件被销毁后补装。
+                // 1163 工厂、正常游戏文字开始、Preview 文字开始及 Preview 空文本入口
+                // 采用手动精确安装，便于启动自检及持久控制器补装。
                 loadedNormally &= TryInitialize(
                     "1163关键入口",
                     () =>
@@ -254,11 +256,27 @@ namespace LFBetterMusic
                     "lf-BetterMusicLyricsSelfCheck",
                     typeof(RectTransform),
                     typeof(CanvasGroup),
+                    typeof(UnityEngine.UI.Image),
+                    typeof(UnityEngine.EventSystems.EventTrigger),
                     typeof(LyricsContrastProbe));
 
                 if (probeObject.GetComponent<LyricsContrastProbe>() == null)
                 {
                     throw new InvalidOperationException("自动描边采样组件无法创建。");
+                }
+
+                if (probeObject.GetComponent<UnityEngine.EventSystems.EventTrigger>() == null ||
+                    probeObject.GetComponent<UnityEngine.UI.Image>() == null)
+                {
+                    throw new InvalidOperationException("浮动歌词拖动或菜单交互组件无法创建。");
+                }
+
+                var state = new FloatingLyricsRuntimeState(1, 0, false);
+                state.SetRuntimeSize(4);
+                state.SetRuntimeColor(12);
+                if (state.EffectiveSizeMode != 4 || !state.HasColorOverride)
+                {
+                    throw new InvalidOperationException("浮动歌词跨 Talk 状态组件自检失败。");
                 }
             }
             finally
@@ -286,12 +304,21 @@ namespace LFBetterMusic
                 typeof(GenEffector1163Patch),
                 nameof(GenEffector1163Patch.Prefix));
 
-            _previewTextEndTarget = AccessTools.Method(
+            _runtimeTextStartTarget = AccessTools.Method(
+                typeof(NewTalkView),
+                nameof(NewTalkView.DoText),
+                new[] { typeof(string) });
+            _runtimeTextStartPrefix = AccessTools.Method(
+                typeof(RuntimeDoTextEffectPatch),
+                nameof(RuntimeDoTextEffectPatch.Prefix));
+
+            _previewTextStartTarget = AccessTools.Method(
                 typeof(PreviewTalkView),
-                nameof(PreviewTalkView.DoTextEnd));
-            _previewTextEndPrefix = AccessTools.Method(
-                typeof(PreviewDoTextEndEffectPatch),
-                nameof(PreviewDoTextEndEffectPatch.Prefix));
+                nameof(PreviewTalkView.DoText),
+                new[] { typeof(string) });
+            _previewTextStartPrefix = AccessTools.Method(
+                typeof(PreviewDoTextEffectPatch),
+                nameof(PreviewDoTextEffectPatch.Prefix));
 
             _previewRefreshTarget = AccessTools.Method(
                 typeof(PreviewTalkView),
@@ -307,18 +334,20 @@ namespace LFBetterMusic
                     "未找到正常游戏 CommonEvtMgr.GenEffector(List<float>, Effector, int, int) 或其 1163 Prefix。");
             }
 
-            if (_previewTextEndTarget == null || _previewTextEndPrefix == null ||
+            if (_runtimeTextStartTarget == null || _runtimeTextStartPrefix == null ||
+                _previewTextStartTarget == null || _previewTextStartPrefix == null ||
                 _previewRefreshTarget == null || _previewRefreshPrefix == null)
             {
                 throw new MissingMethodException(
-                    "未找到编辑器 PreviewTalkView 的 EFFECT 桥接入口或其 Prefix。");
+                    "未找到正常游戏或编辑器 Preview 的 1163 文字开始入口及其 Prefix。");
             }
         }
 
         private bool AreCriticalPatchesInstalled()
         {
             return HasPrefix(_normalFactoryTarget, _normalFactoryPrefix) &&
-                   HasPrefix(_previewTextEndTarget, _previewTextEndPrefix) &&
+                   HasPrefix(_runtimeTextStartTarget, _runtimeTextStartPrefix) &&
+                   HasPrefix(_previewTextStartTarget, _previewTextStartPrefix) &&
                    HasPrefix(_previewRefreshTarget, _previewRefreshPrefix);
         }
 
@@ -345,7 +374,8 @@ namespace LFBetterMusic
             try
             {
                 if (_normalFactoryTarget == null || _normalFactoryPrefix == null ||
-                    _previewTextEndTarget == null || _previewTextEndPrefix == null ||
+                    _runtimeTextStartTarget == null || _runtimeTextStartPrefix == null ||
+                    _previewTextStartTarget == null || _previewTextStartPrefix == null ||
                     _previewRefreshTarget == null || _previewRefreshPrefix == null)
                 {
                     ResolveCriticalPatchMethods();
@@ -356,8 +386,12 @@ namespace LFBetterMusic
                     _normalFactoryPrefix,
                     new[] { "lince.multiplelovers" });
                 InstallPrefixIfMissing(
-                    _previewTextEndTarget,
-                    _previewTextEndPrefix,
+                    _runtimeTextStartTarget,
+                    _runtimeTextStartPrefix,
+                    null);
+                InstallPrefixIfMissing(
+                    _previewTextStartTarget,
+                    _previewTextStartPrefix,
                     null);
                 InstallPrefixIfMissing(
                     _previewRefreshTarget,
@@ -418,11 +452,12 @@ namespace LFBetterMusic
                     "正常游戏批次 GenEffector 自检失败，Talk EFFECT 链仍可能出现 Effect Not Found。");
             }
 
-            if (!HasPrefix(_previewTextEndTarget, _previewTextEndPrefix) ||
+            if (!HasPrefix(_runtimeTextStartTarget, _runtimeTextStartPrefix) ||
+                !HasPrefix(_previewTextStartTarget, _previewTextStartPrefix) ||
                 !HasPrefix(_previewRefreshTarget, _previewRefreshPrefix))
             {
                 throw new InvalidOperationException(
-                    "编辑器 PreviewTalkView EFFECT 桥接自检失败。");
+                    "正常游戏或编辑器 Preview 的 1163 提前入口自检失败。");
             }
 
         }

@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using HarmonyLib;
+using LFBetterMusic.Effects;
 using LFBetterMusic.Preview;
 using LFBetterMusic.Runtime;
 using Sdk;
@@ -13,7 +14,12 @@ namespace LFBetterMusic.Patches
     {
         private static void Prefix(NewTalkView __instance, int __0)
         {
-            BetterMusicController.Instance?.BeforeTalkRefresh(__instance, __0);
+            EarlyTalkPlan plan = Early1163Execution.PrepareRuntimeIncomingTalk(__instance, __0);
+            bool deferSingleTalkEnd = !plan.IsEmpty || plan.HasValidPlayCommand;
+            BetterMusicController.Instance?.BeforeTalkRefresh(
+                __instance,
+                __0,
+                deferSingleTalkEnd);
         }
 
         private static void Postfix(NewTalkView __instance)
@@ -23,13 +29,13 @@ namespace LFBetterMusic.Patches
         }
     }
 
-
     [HarmonyPatch(typeof(CommonTalkView), nameof(CommonTalkView.RefreshTalk))]
     internal static class CommonTalkRefreshLifecyclePatch
     {
         private static void Prefix(CommonTalkView __instance, int __0)
         {
-            BetterMusicController.Instance?.BeforeTalkRefresh(__instance, __0);
+            // CommonTalkView 没有 DoText 提前入口，继续按原逻辑在切换时结束单 Talk 会话。
+            BetterMusicController.Instance?.BeforeTalkRefresh(__instance, __0, false);
         }
 
         private static void Postfix(CommonTalkView __instance)
@@ -43,7 +49,12 @@ namespace LFBetterMusic.Patches
     {
         private static void Prefix(PreviewTalkView __instance, int __0)
         {
-            BetterMusicController.Instance?.BeforeTalkRefresh(__instance, __0);
+            EarlyTalkPlan plan = Early1163Execution.PreparePreviewIncomingTalk(__instance, __0);
+            bool deferSingleTalkEnd = !plan.IsEmpty || plan.HasValidPlayCommand;
+            BetterMusicController.Instance?.BeforeTalkRefresh(
+                __instance,
+                __0,
+                deferSingleTalkEnd);
         }
 
         private static void Postfix(PreviewTalkView __instance)
@@ -94,7 +105,6 @@ namespace LFBetterMusic.Patches
         }
     }
 
-    // PreviewTalkView 没有覆写 CloseView，因此其关闭入口位于 BaseView。
     [HarmonyPatch(typeof(BaseView), nameof(BaseView.CloseView))]
     internal static class PreviewBaseCloseGuardPatch
     {

@@ -17,6 +17,14 @@ namespace LFBetterMusic.Patches
             int __3,
             ref Effector __result)
         {
+            // 同一条 1163 已在 DoText 开始前直接执行时，DoTextEnd 构造原版 EFFECT 链
+            // 只需保留它之前已构造的 Effector。其他原版 EFFECT 的顺序和时机不变。
+            if (Early1163ExecutionTracker.Consume(__0))
+            {
+                __result = __1;
+                return false;
+            }
+
             bool isCustom = BetterMusicEffectEncoding.TryParse(
                 __0,
                 out BetterMusicEffectRequest request,
@@ -30,7 +38,6 @@ namespace LFBetterMusic.Patches
             if (error != null)
             {
                 Plugin.LogEffectError(error, __0);
-                // 当前 1163 无效时保留前面已经构造好的 Effector 链。
                 __result = __1;
                 return false;
             }

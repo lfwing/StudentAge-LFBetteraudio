@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
     <LangVersion>latest</LangVersion>
@@ -6,7 +6,7 @@
     <AssemblyName>LFBetterMusicPlugin</AssemblyName>
     <RootNamespace>LFBetterMusic</RootNamespace>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
-    <Version>1.5.1</Version>
+    <Version>1.6.2</Version>
     <GameDir Condition="'$(GameDir)' == ''">$(STUDENTAGE_GAME_DIR)</GameDir>
     <GameManagedDir>$(GameDir)\StudentAge_Data\Managed</GameManagedDir>
     <BepInExDir>$(GameDir)\BepInEx</BepInExDir>

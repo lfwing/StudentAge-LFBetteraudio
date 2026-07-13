@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using LFBetterMusic.Audio;
 using LFBetterMusic.Effects;
 using LFBetterMusic.Lyrics;
@@ -11,6 +11,7 @@ namespace LFBetterMusic.Runtime
         None,
         Manual,
         Automatic,
+        FastForward,
         System
     }
 
@@ -24,6 +25,7 @@ namespace LFBetterMusic.Runtime
         public int PlayMode { get; set; }
         public int LyricSizeMode { get; set; }
         public int LyricColorMode { get; set; }
+        public FloatingLyricsRuntimeState LyricsUiState { get; set; }
         public bool ShowLyrics { get; set; }
         public bool ShouldLoop { get; set; }
         public int TalkId { get; set; }
@@ -46,6 +48,7 @@ namespace LFBetterMusic.Runtime
         public bool IsLoading { get; set; }
         public bool IsPlaying { get; set; }
         public bool IsPaused { get; set; }
+        public bool IsTransitionTail { get; set; }
         public bool IsCancelled { get; set; }
 
         internal bool IsSinging => ContentKind == BetterMusicContentKind.Singing;

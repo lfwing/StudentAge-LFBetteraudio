@@ -1,4 +1,4 @@
-BetterMusic 公开 Mod 作者模板（1.5.1）
+﻿BetterMusic 公开 Mod 作者模板（1.6.2）
 
 把整个 Bettermusic 文件夹放到你的 Mod 根目录：
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using Config;
 using GenUI.Talk;
@@ -27,6 +27,13 @@ namespace LFBetterMusic.Runtime
         private FloatingLyricsOverlay _lyricsOverlay;
         private HoldToSkipOverlay _holdToSkipOverlay;
         private long _tokenCounter;
+
+        // 预加载只缓存 ResMgr 已返回的 AudioClip，并复用同一路径的在途请求。
+        // 不接管原版 AudioMgr，也不改变原版音频配置。
+        private readonly Dictionary<string, AudioClip> _audioClipCache =
+            new Dictionary<string, AudioClip>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, List<Action<AudioClip>>> _audioClipWaiters =
+            new Dictionary<string, List<Action<AudioClip>>>(StringComparer.OrdinalIgnoreCase);
 
         // 插件音乐与原版 BGM 使用两个独立 AudioSource。
         // 仅当插件音乐实际播放时持有原版 BGM 的“优先级租约”；
@@ -209,6 +216,34 @@ namespace LFBetterMusic.Runtime
             }
         }
 
+        internal void PreloadRequest(
+            BetterMusicEffectRequest request,
+            TalkChannel channel,
+            Dictionary<int, AudioCfg> previewAudioCfgMap = null)
+        {
+            if (request == null || request.Command != BetterMusicCommandKind.Play)
+            {
+                return;
+            }
+
+            var context = new MusicResolveContext
+            {
+                Channel = channel,
+                PreviewAudioCfgMap = previewAudioCfgMap
+            };
+
+            if (!MusicResolver.TryResolve(
+                    request.MusicId,
+                    context,
+                    out ResolvedMusic resolved,
+                    out string _))
+            {
+                return;
+            }
+
+            RequestAudioClip(resolved.AudioPath, null);
+        }
+
         private void StartSession(
             BetterMusicEffectRequest request,
             BaseView owner,
@@ -253,6 +288,10 @@ namespace LFBetterMusic.Runtime
                 PlayMode = request.PlayMode,
                 LyricSizeMode = request.LyricSizeMode,
                 LyricColorMode = request.LyricColorMode,
+                LyricsUiState = new FloatingLyricsRuntimeState(
+                    request.LyricSizeMode,
+                    request.LyricColorMode,
+                    request.ContentKind == BetterMusicContentKind.Singing),
                 ShowLyrics = request.ShowLyrics,
                 ShouldLoop = request.ShouldLoop,
                 TalkId = talkId,
@@ -312,41 +351,38 @@ namespace LFBetterMusic.Runtime
             }
 
             // 到此说明参数、资源和 LRC 均通过；无效的新指令不会破坏旧会话。
-            EndActiveSessionInternal("新音乐替换旧会话", true, true, false);
+            bool clipReady = TryGetCachedAudioClip(resolved.AudioPath, out AudioClip cachedClip);
+            bool preserveSuppression = clipReady && _gameMusicSuppressionHeld;
+
+            // 预加载命中时，旧插件音乐与新插件音乐在同一帧交接，并保留原版 BGM
+            // 的暂停租约，避免原版 BGM 在换轨瞬间短暂恢复。未命中时仍按旧规则
+            // 归还原版通道，不在加载期间制造静音占用。
+            EndActiveSessionInternal(
+                "新音乐替换旧会话",
+                true,
+                !preserveSuppression,
+                false);
             token = ++_tokenCounter;
             session.Token = token;
             _session = session;
 
             if (singleTalk)
             {
+                // 只在新单 Talk 会话建立时复位一次快进，不再逐帧接管全局 timeScale。
                 DisableFastForwardNow(owner);
             }
 
             AttachLyricsIfPossible(session, owner);
 
-            AudioSource source = EnsureAudioSource("开始新会话");
-            if (source == null)
+            if (clipReady)
             {
-                FailActiveSession("无法创建 AudioSource");
+                HandleLoadedClipSafely(token, cachedClip);
                 return;
             }
 
-            TryBindGameMusicMixer(source);
-
-            ResMgr.LoadAudioAsync(resolved.AudioPath, clip =>
-            {
-                try
-                {
-                    HandleLoadedClip(token, clip);
-                }
-                catch (Exception ex)
-                {
-                    if (_session != null && _session.Token == token)
-                    {
-                        FailActiveSession($"音频异步回调失败：{ex.Message}");
-                    }
-                }
-            }, null, false);
+            RequestAudioClip(
+                resolved.AudioPath,
+                clip => HandleLoadedClipSafely(token, clip));
         }
 
         private static bool ValidateRequestedLineRange(
@@ -374,6 +410,113 @@ namespace LFBetterMusic.Runtime
             }
 
             return true;
+        }
+
+        private bool TryGetCachedAudioClip(string audioPath, out AudioClip clip)
+        {
+            clip = null;
+            if (string.IsNullOrWhiteSpace(audioPath) ||
+                !_audioClipCache.TryGetValue(audioPath, out AudioClip cached))
+            {
+                return false;
+            }
+
+            if (cached == null)
+            {
+                _audioClipCache.Remove(audioPath);
+                return false;
+            }
+
+            clip = cached;
+            return true;
+        }
+
+        private void RequestAudioClip(string audioPath, Action<AudioClip> onLoaded)
+        {
+            if (string.IsNullOrWhiteSpace(audioPath))
+            {
+                onLoaded?.Invoke(null);
+                return;
+            }
+
+            if (TryGetCachedAudioClip(audioPath, out AudioClip cached))
+            {
+                onLoaded?.Invoke(cached);
+                return;
+            }
+
+            if (_audioClipWaiters.TryGetValue(
+                    audioPath,
+                    out List<Action<AudioClip>> existingWaiters))
+            {
+                if (onLoaded != null)
+                {
+                    existingWaiters.Add(onLoaded);
+                }
+                return;
+            }
+
+            var waiters = new List<Action<AudioClip>>();
+            if (onLoaded != null)
+            {
+                waiters.Add(onLoaded);
+            }
+            _audioClipWaiters[audioPath] = waiters;
+
+            try
+            {
+                ResMgr.LoadAudioAsync(audioPath, clip =>
+                {
+                    if (clip != null)
+                    {
+                        _audioClipCache[audioPath] = clip;
+                    }
+
+                    if (!_audioClipWaiters.TryGetValue(
+                            audioPath,
+                            out List<Action<AudioClip>> callbacks))
+                    {
+                        return;
+                    }
+
+                    _audioClipWaiters.Remove(audioPath);
+                    foreach (Action<AudioClip> callback in callbacks)
+                    {
+                        try
+                        {
+                            callback?.Invoke(clip);
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.LogEffectError($"音频加载回调异常：{ex.Message}");
+                        }
+                    }
+                }, null, false);
+            }
+            catch (Exception ex)
+            {
+                _audioClipWaiters.Remove(audioPath);
+                foreach (Action<AudioClip> callback in waiters)
+                {
+                    callback?.Invoke(null);
+                }
+                Plugin.LogEffectError($"音频预加载启动失败：{ex.Message}");
+            }
+        }
+
+        private void HandleLoadedClipSafely(long token, AudioClip clip)
+        {
+            try
+            {
+                HandleLoadedClip(token, clip);
+            }
+            catch (Exception ex)
+            {
+                if (_session != null && _session.Token == token)
+                {
+                    FailActiveSession($"音频异步回调失败：{ex.Message}");
+                }
+            }
         }
 
         private void HandleLoadedClip(long token, AudioClip clip)
@@ -732,6 +875,14 @@ namespace LFBetterMusic.Runtime
             {
                 return _advanceContextOrigin;
             }
+
+            // NewTalkView.DoTextEnd 在 Time.timeScale > 1 时会直接调用 OnClickNext。
+            // 这条路径不会经过 SpeedUp 方法本身，因此必须在 NextTalk 入口再次识别。
+            if (owner is NewTalkView && Time.timeScale > 1.001f)
+            {
+                return TalkAdvanceOrigin.FastForward;
+            }
+
             return TalkAdvanceOrigin.System;
         }
 
@@ -754,13 +905,17 @@ namespace LFBetterMusic.Runtime
                 return true;
             }
 
-            if (!IsOwnedSingleTalkSession(session, owner))
+            if (!IsBlockingSingleTalkSession(session, owner))
             {
                 return true;
             }
 
-            DisableFastForwardNow(owner);
             TalkAdvanceOrigin origin = GetAdvanceOrigin(owner);
+            if (origin == TalkAdvanceOrigin.FastForward)
+            {
+                // 只在实际快进尝试到达最终推进入口时复位一次，不逐帧接管 timeScale。
+                DisableFastForwardNow(owner);
+            }
 
             if (Time.unscaledTime < session.MinimumAdvanceAt)
             {
@@ -780,7 +935,7 @@ namespace LFBetterMusic.Runtime
                 case 1:
                     if (origin == TalkAdvanceOrigin.Manual)
                     {
-                        EndActiveSessionInternal("类型1手动进入 nexttalk", true, true, false);
+                        BeginTransitionTail(session);
                         return true;
                     }
 
@@ -790,7 +945,7 @@ namespace LFBetterMusic.Runtime
                 case 2:
                     if (origin == TalkAdvanceOrigin.Manual || origin == TalkAdvanceOrigin.System)
                     {
-                        EndActiveSessionInternal("类型2进入 nexttalk", true, true, false);
+                        BeginTransitionTail(session);
                         return true;
                     }
 
@@ -808,22 +963,66 @@ namespace LFBetterMusic.Runtime
             }
         }
 
+        private void BeginTransitionTail(BetterMusicSession session)
+        {
+            if (session == null || session.IsCancelled || session.IsTransitionTail)
+            {
+                return;
+            }
+
+            session.IsTransitionTail = true;
+            session.PendingAdvanceOrigin = TalkAdvanceOrigin.None;
+            ClearScheduledAdvance();
+            ClearHoldState(session.OwnerView);
+            _lyricsOverlay?.Destroy();
+        }
+
+        internal bool ShouldTrackAutomaticAdvance(BaseView owner)
+        {
+            BetterMusicSession session = _session;
+            return IsBlockingSingleTalkSession(session, owner) ||
+                   (session != null && !session.IsCancelled &&
+                    session.BlocksBackgroundAutomaticAdvance &&
+                    ReferenceEquals(session.OwnerView, owner));
+        }
+
         internal bool ShouldBlockFastForward(BaseView owner)
         {
-            return IsOwnedSingleTalkSession(_session, owner);
+            return IsBlockingSingleTalkSession(_session, owner);
         }
 
         internal bool ShouldBlockClose(BaseView owner)
         {
-            return IsOwnedSingleTalkSession(_session, owner) && _session.PlayMode == 3;
+            return IsBlockingSingleTalkSession(_session, owner) && _session.PlayMode == 3;
         }
 
-        internal void BeforeTalkRefresh(BaseView owner, int newTalkId)
+        internal void BeforeTalkRefresh(
+            BaseView owner,
+            int newTalkId,
+            bool deferSingleTalkEndUntilTextStart)
         {
             BetterMusicSession session = _session;
-            if (IsOwnedSingleTalkSession(session, owner) && session.TalkId != newTalkId)
+            if (!IsOwnedSingleTalkSession(session, owner) || session.TalkId == newTalkId)
+            {
+                return;
+            }
+
+            session.PendingAdvanceOrigin = TalkAdvanceOrigin.None;
+            ClearScheduledAdvance();
+            ClearHoldState(owner);
+
+            if (!deferSingleTalkEndUntilTextStart)
             {
                 EndActiveSessionInternal("进入新的 Talk", true, true, false);
+            }
+        }
+
+        internal void FinalizeTextStart(BaseView owner, int currentTalkId)
+        {
+            BetterMusicSession session = _session;
+            if (IsOwnedSingleTalkSession(session, owner) && session.TalkId != currentTalkId)
+            {
+                EndActiveSessionInternal("新 Talk 开始且没有可用的新 1163 会话", true, true, false);
             }
         }
 
@@ -921,7 +1120,7 @@ namespace LFBetterMusic.Runtime
 
         private bool IsLockedModeThree(BaseView owner)
         {
-            return IsOwnedSingleTalkSession(_session, owner) && _session.PlayMode == 3;
+            return IsBlockingSingleTalkSession(_session, owner) && _session.PlayMode == 3;
         }
 
         private void ClearHoldState(BaseView owner)
@@ -1199,6 +1398,8 @@ namespace LFBetterMusic.Runtime
         {
             EndActiveSessionInternal("Shutdown", true, true, false);
             ClearScheduledAdvance();
+            _audioClipWaiters.Clear();
+            _audioClipCache.Clear();
             _holdToSkipOverlay?.Destroy();
             _lyricsOverlay?.Destroy();
             InvalidateAudioSource("Shutdown");
@@ -1306,10 +1507,17 @@ namespace LFBetterMusic.Runtime
 
             if (owner is NewTalkUI talkUi)
             {
+                if (session.LyricsUiState == null)
+                {
+                    session.LyricsUiState = new FloatingLyricsRuntimeState(
+                        session.LyricSizeMode,
+                        session.LyricColorMode,
+                        session.IsSinging);
+                }
+
                 _lyricsOverlay?.Attach(
                     talkUi,
-                    session.LyricSizeMode,
-                    session.LyricColorMode);
+                    session.LyricsUiState);
 
                 // 背景音乐跨 Talk 重建歌词控件后，需要按当前播放时间重新定位歌词。
                 session.LyricIndex = -1;
@@ -1323,8 +1531,14 @@ namespace LFBetterMusic.Runtime
 
         private void DisableFastForwardNow(BaseView owner)
         {
+            if (Time.timeScale <= 1.001f)
+            {
+                return;
+            }
+
             if (!(owner is NewTalkView runtimeView))
             {
+                Game.TimeChange(1f);
                 return;
             }
 
@@ -1334,7 +1548,7 @@ namespace LFBetterMusic.Runtime
             }
             catch
             {
-                Time.timeScale = 1f;
+                Game.TimeChange(1f);
             }
         }
 
@@ -1566,6 +1780,14 @@ namespace LFBetterMusic.Runtime
             return session != null && !session.IsCancelled &&
                    session.Scope == BetterMusicPlaybackScope.SingleTalk &&
                    ReferenceEquals(session.OwnerView, owner);
+        }
+
+        private static bool IsBlockingSingleTalkSession(
+            BetterMusicSession session,
+            BaseView owner)
+        {
+            return IsOwnedSingleTalkSession(session, owner) &&
+                   !session.IsTransitionTail;
         }
 
         private static bool IsOwnerAlive(BaseView owner)
