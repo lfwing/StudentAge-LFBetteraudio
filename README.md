@@ -10,12 +10,6 @@ LFBetterAudio，一款适用于游戏《学生时代》，基于 BepInEx、Harmo
 - 32 色歌词调色板
 - 歌词位置拖动、复位与锁定
 
-插件区分“音乐”和“音效”：
-- `type=1`：音乐；
-- `type=2`：音效；
-- 未填写或填写其他值时按 `type=1` 处理。
-音乐会取得原版 BGM 通道的优先控制；音效不会抢占原版 BGM，可与音乐及其他插件音效同时播放。
-
 BetterAudio 同时兼容正常游戏剧情和剧情编辑器 Preview。
 
 *<font color="#4bacc6">此模组实际代码编写工作由AI完成，本人仅负责构思及debug</font>*
@@ -639,7 +633,7 @@ https://github.com/white12666/StudentAgeEditorPlus
 4. 不建议把无授权的商业音乐直接打包上传至公开创意工坊。
 5. 使用第三方 Mod 存在一般性的兼容和稳定性风险，建议提前备份存档及相关文件。
 
-# 二十三、致谢
+# 二十一、致谢
 - BepInEx：Unity 游戏插件框架；
 - Harmony：运行时补丁框架；
 - TextMeshPro：浮动歌词显示；
