@@ -58,6 +58,12 @@ BetterAudio 同时兼容正常游戏剧情和剧情编辑器 Preview。
 
 上传到 Steam 创意工坊后，BetterMusic 会直接扫描并读取对应 Workshop Item，无需要求玩家手动复制音乐和歌词到 BepInEx。
 
+## 2.4 接入StudentAgeModManager
+本插件已接入StudentAgeModManager。
+项目地址：https://github.com/white12666/StudentAgeModManager
+如正确安装了modmanager，那么只需要通过steam创意工坊订阅，随后像普通的mod一样在游戏中启用即可。
+
+
 # 三、资源包配置
 ## 3.1 标准目录
 ```text
